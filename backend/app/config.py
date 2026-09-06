@@ -19,11 +19,6 @@ class Settings:
         "Sheet1",
     )
 
-    GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv(
-        "GOOGLE_SERVICE_ACCOUNT_JSON",
-        "",
-    )
-
     GOOGLE_TOKEN_JSON = os.getenv(
         "GOOGLE_TOKEN_JSON",
         "",

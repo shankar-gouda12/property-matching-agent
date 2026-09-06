@@ -1,10 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import auth, search
 from app.config import settings
+from app.routes import auth, search
 
-app = FastAPI(title=settings.PROJECT_NAME)
+
+app = FastAPI(
+    title=settings.PROJECT_NAME
+)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,8 +18,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/api")
-app.include_router(search.router, prefix="/api")
+
+app.include_router(
+    auth.router,
+    prefix="/api",
+)
+
+app.include_router(
+    search.router,
+    prefix="/api",
+)
 
 
 @app.get("/")

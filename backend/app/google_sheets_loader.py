@@ -8,7 +8,11 @@ from googleapiclient.discovery import build
 
 from app.config import settings
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly"
+]
+
 CACHE_TTL_SECONDS = 30
 
 _cached_inventory: pd.DataFrame | None = None
@@ -30,13 +34,28 @@ def _get_credentials() -> Credentials:
             "GOOGLE_TOKEN_JSON contains invalid JSON."
         ) from exc
 
-    credentials = Credentials.from_authorized_user_info(
-        token_info,
-        SCOPES,
-    )
+    try:
+        credentials = Credentials.from_authorized_user_info(
+            token_info,
+            SCOPES,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to create Google OAuth credentials: {exc}"
+        ) from exc
 
-    if credentials.expired and credentials.refresh_token:
-        credentials.refresh(Request())
+    if credentials.expired:
+        if not credentials.refresh_token:
+            raise RuntimeError(
+                "Google OAuth access token expired and no refresh token is available."
+            )
+
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to refresh Google OAuth credentials: {exc}"
+            ) from exc
 
     if not credentials.valid:
         raise RuntimeError(
@@ -47,29 +66,50 @@ def _get_credentials() -> Credentials:
 
 
 def _fetch_sheet() -> pd.DataFrame:
-    if not settings.GOOGLE_SHEETS_SPREADSHEET_ID:
+    spreadsheet_id = settings.GOOGLE_SHEETS_SPREADSHEET_ID
+    worksheet_name = settings.GOOGLE_SHEETS_WORKSHEET
+
+    if not spreadsheet_id:
         raise RuntimeError(
             "GOOGLE_SHEETS_SPREADSHEET_ID must be configured."
         )
 
-    service = build(
-        "sheets",
-        "v4",
-        credentials=_get_credentials(),
-        cache_discovery=False,
-    )
-
-    result = (
-        service.spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=settings.GOOGLE_SHEETS_SPREADSHEET_ID,
-            range=f"{settings.GOOGLE_SHEETS_WORKSHEET}!A:Z",
+    if not worksheet_name:
+        raise RuntimeError(
+            "GOOGLE_SHEETS_WORKSHEET must be configured."
         )
-        .execute()
-    )
+
+    try:
+        credentials = _get_credentials()
+
+        service = build(
+            "sheets",
+            "v4",
+            credentials=credentials,
+            cache_discovery=False,
+        )
+
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{worksheet_name}!A:Z",
+            )
+            .execute()
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read Google Sheet: {exc}"
+        ) from exc
 
     values = result.get("values", [])
+
+    if not values:
+        raise ValueError(
+            "Google Sheet returned no data."
+        )
 
     header_index = settings.INVENTORY_HEADER_ROW - 1
 
@@ -78,30 +118,33 @@ def _fetch_sheet() -> pd.DataFrame:
             "Google Sheet does not contain the configured header row."
         )
 
-    rows = values[header_index + 1:]
-
-    width = max(
-        [len(values[header_index]), *(len(row) for row in rows)],
-        default=0,
-    )
-
     headers = [
         str(header).strip()
         for header in values[header_index]
     ]
+
+    rows = values[header_index + 1:]
+
+    width = max(
+        [
+            len(headers),
+            *(len(row) for row in rows),
+        ],
+        default=0,
+    )
 
     headers.extend(
         f"Extra_{index}"
         for index in range(len(headers), width)
     )
 
-    rows = [
+    normalized_rows = [
         row + [None] * (width - len(row))
         for row in rows
     ]
 
     dataframe = pd.DataFrame(
-        rows,
+        normalized_rows,
         columns=headers,
     )
 
@@ -137,13 +180,8 @@ def _fetch_sheet() -> pd.DataFrame:
 def load_google_sheet(
     force_refresh: bool = False,
 ) -> pd.DataFrame:
-    """
-    Return Google Sheet inventory.
-
-    The deployed function refreshes its in-memory cache
-    at most every 30 seconds.
-    """
-    global _cached_at, _cached_inventory
+    global _cached_inventory
+    global _cached_at
 
     now = time.monotonic()
 
@@ -154,7 +192,9 @@ def load_google_sheet(
     ):
         return _cached_inventory
 
-    _cached_inventory = _fetch_sheet()
+    dataframe = _fetch_sheet()
+
+    _cached_inventory = dataframe
     _cached_at = now
 
     return _cached_inventory
