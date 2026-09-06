@@ -1,109 +1,196 @@
 import json
 import time
 
-import gspread
 import pandas as pd
-from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 from app.config import settings
 
-_inventory_df: pd.DataFrame | None = None
-_inventory_version: float | None = None
-_last_loaded_at = 0.0
 
-REQUIRED_COLUMNS = [
-    "Property Type",
-    "BHK",
-    "Budget (Cr)",
-    "Location",
-    "Status",
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly"
 ]
-GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+CACHE_TTL_SECONDS = 30
+
+_cached_inventory: pd.DataFrame | None = None
+_cached_at = 0.0
 
 
-def _clean_and_validate(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        raise ValueError("Inventory source is empty.")
+def _get_credentials() -> Credentials:
+    token_json = settings.GOOGLE_TOKEN_JSON
 
-    df.columns = [
-        str(col).strip()
-        if not str(col).startswith("Unnamed")
-        else f"Extra_{i}"
-        for i, col in enumerate(df.columns)
+    if not token_json:
+        raise RuntimeError(
+            "GOOGLE_TOKEN_JSON is not configured."
+        )
+
+    try:
+        token_info = json.loads(token_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GOOGLE_TOKEN_JSON contains invalid JSON."
+        ) from exc
+
+    try:
+        credentials = Credentials.from_authorized_user_info(
+            token_info,
+            SCOPES,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to create Google OAuth credentials: {exc}"
+        ) from exc
+
+    if credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to refresh Google OAuth credentials: {exc}"
+            ) from exc
+
+    if not credentials.valid:
+        raise RuntimeError(
+            "Google OAuth credentials are invalid or expired."
+        )
+
+    return credentials
+
+
+def _fetch_sheet() -> pd.DataFrame:
+    spreadsheet_id = settings.GOOGLE_SHEETS_SPREADSHEET_ID
+
+    if not spreadsheet_id:
+        raise RuntimeError(
+            "GOOGLE_SHEETS_SPREADSHEET_ID must be configured."
+        )
+
+    worksheet = settings.GOOGLE_SHEETS_WORKSHEET
+
+    if not worksheet:
+        raise RuntimeError(
+            "GOOGLE_SHEETS_WORKSHEET must be configured."
+        )
+
+    try:
+        service = build(
+            "sheets",
+            "v4",
+            credentials=_get_credentials(),
+            cache_discovery=False,
+        )
+
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{worksheet}!A:Z",
+            )
+            .execute()
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read Google Sheet: {exc}"
+        ) from exc
+
+    values = result.get("values", [])
+
+    header_index = settings.INVENTORY_HEADER_ROW - 1
+
+    if len(values) <= header_index:
+        raise ValueError(
+            "Google Sheet does not contain the configured header row."
+        )
+
+    headers = [
+        str(header).strip()
+        for header in values[header_index]
     ]
 
-    df.rename(columns={
-        "BHK/ Area": "BHK",
-        "Rate": "Budget (Cr)",
-        "Project name": "Project Name",
-    }, inplace=True)
-    df.dropna(axis=1, how="all", inplace=True)
-    df.dropna(axis=0, how="all", inplace=True)
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    rows = values[header_index + 1 :]
 
-    if missing:
-        raise ValueError(f"Missing required inventory column(s): {', '.join(missing)}")
-    return df.reset_index(drop=True)
+    width = max(
+        [
+            len(headers),
+            *(len(row) for row in rows),
+        ],
+        default=0,
+    )
 
+    headers.extend(
+        f"Extra_{index}"
+        for index in range(len(headers), width)
+    )
 
-def _load_excel() -> tuple[pd.DataFrame, float]:
-    file_path = settings.INVENTORY_FILE_PATH
-    if not file_path.exists():
-        raise FileNotFoundError(f"Excel inventory file not found at: {file_path}")
-    try:
-        df = pd.read_excel(file_path, header=settings.INVENTORY_HEADER_ROW - 1, engine="openpyxl")
-    except Exception as error:
-        raise RuntimeError(f"Failed to read Excel file: {error}") from error
-    return _clean_and_validate(df), file_path.stat().st_mtime
+    normalized_rows = [
+        row + [None] * (width - len(row))
+        for row in rows
+    ]
 
+    dataframe = pd.DataFrame(
+        normalized_rows,
+        columns=headers,
+    )
 
-def _load_google_sheet() -> pd.DataFrame:
-    if not settings.GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is required when using Google Sheets."
+    dataframe.rename(
+        columns={
+            "BHK/ Area": "BHK",
+            "Rate": "Budget (Cr)",
+            "Project name": "Project Name",
+        },
+        inplace=True,
+    )
+
+    dataframe.dropna(
+        axis=0,
+        how="all",
+        inplace=True,
+    )
+
+    dataframe.dropna(
+        axis=1,
+        how="all",
+        inplace=True,
+    )
+
+    if dataframe.empty:
+        raise ValueError(
+            "Google Sheet does not contain any property rows."
         )
-    try:
-        service_account_info = json.loads(settings.GOOGLE_SERVICE_ACCOUNT_JSON)
-        if service_account_info.get("type") != "service_account":
-            raise ValueError("the JSON must contain type=service_account")
-        credentials = Credentials.from_service_account_info(
-            service_account_info,
-            scopes=GOOGLE_SHEETS_SCOPES,
-        )
-        worksheet = gspread.authorize(credentials).open_by_key(
-            settings.GOOGLE_SHEETS_SPREADSHEET_ID
-        ).worksheet(settings.GOOGLE_SHEETS_WORKSHEET)
-        values = worksheet.get_all_values()
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON must contain valid service-account JSON."
-        ) from error
-    except ValueError as error:
-        raise RuntimeError(
-            f"GOOGLE_SERVICE_ACCOUNT_JSON is invalid: {error}"
-        ) from error
-    except Exception as error:
-        raise RuntimeError(f"Failed to read Google Sheet: {error}") from error
-    header_index = settings.INVENTORY_HEADER_ROW - 1
-    if len(values) <= header_index:
-        raise ValueError("Google Sheet does not contain the configured header row.")
-    return _clean_and_validate(pd.DataFrame(values[header_index + 1:], columns=values[header_index]))
+
+    return dataframe.reset_index(drop=True)
 
 
-def load_inventory(force_refresh: bool = False) -> pd.DataFrame:
-    """Load from Google Sheets when configured, otherwise use the local Excel file."""
-    global _inventory_df, _inventory_version, _last_loaded_at
-    use_google_sheets = bool(settings.GOOGLE_SHEETS_SPREADSHEET_ID)
+def load_google_sheet(
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    """
+    Load property inventory from Google Sheets.
+
+    The inventory is cached for 30 seconds by default.
+    force_refresh=True bypasses the cache.
+    """
+
+    global _cached_at
+    global _cached_inventory
+
     now = time.monotonic()
-    if use_google_sheets:
-        if not force_refresh and _inventory_df is not None and now - _last_loaded_at < settings.INVENTORY_REFRESH_SECONDS:
-            return _inventory_df
-        df, version = _load_google_sheet(), now
-    else:
-        df, version = _load_excel()
-        if not force_refresh and _inventory_df is not None and _inventory_version == version:
-            return _inventory_df
 
-    _inventory_df, _inventory_version, _last_loaded_at = df, version, now
-    print(f"Inventory loaded: {len(df)} properties from {'Google Sheets' if use_google_sheets else 'Excel'}")
-    return _inventory_df
+    if (
+        not force_refresh
+        and _cached_inventory is not None
+        and now - _cached_at < CACHE_TTL_SECONDS
+    ):
+        return _cached_inventory
+
+    dataframe = _fetch_sheet()
+
+    _cached_inventory = dataframe
+    _cached_at = now
+
+    return _cached_inventory
