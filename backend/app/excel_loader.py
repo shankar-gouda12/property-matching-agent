@@ -59,15 +59,29 @@ def _load_excel() -> tuple[pd.DataFrame, float]:
 
 def _load_google_sheet() -> pd.DataFrame:
     if not settings.GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is required when using Google Sheets.")
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is required when using Google Sheets."
+        )
     try:
+        service_account_info = json.loads(settings.GOOGLE_SERVICE_ACCOUNT_JSON)
+        if service_account_info.get("type") != "service_account":
+            raise ValueError("the JSON must contain type=service_account")
         credentials = Credentials.from_service_account_info(
-            json.loads(settings.GOOGLE_SERVICE_ACCOUNT_JSON), scopes=GOOGLE_SHEETS_SCOPES
+            service_account_info,
+            scopes=GOOGLE_SHEETS_SCOPES,
         )
         worksheet = gspread.authorize(credentials).open_by_key(
             settings.GOOGLE_SHEETS_SPREADSHEET_ID
         ).worksheet(settings.GOOGLE_SHEETS_WORKSHEET)
         values = worksheet.get_all_values()
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON must contain valid service-account JSON."
+        ) from error
+    except ValueError as error:
+        raise RuntimeError(
+            f"GOOGLE_SERVICE_ACCOUNT_JSON is invalid: {error}"
+        ) from error
     except Exception as error:
         raise RuntimeError(f"Failed to read Google Sheet: {error}") from error
     header_index = settings.INVENTORY_HEADER_ROW - 1
