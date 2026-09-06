@@ -1,0 +1,33 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Google OAuth
+credentials/
+**/credentials/
+client_secret.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Excel/local data
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
