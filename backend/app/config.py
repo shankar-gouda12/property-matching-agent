@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -17,11 +16,6 @@ class Settings:
     GOOGLE_SHEETS_WORKSHEET = os.getenv(
         "GOOGLE_SHEETS_WORKSHEET",
         "Sheet1",
-    )
-
-    GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv(
-        "GOOGLE_SERVICE_ACCOUNT_JSON",
-        "",
     )
 
     GOOGLE_TOKEN_JSON = os.getenv(
