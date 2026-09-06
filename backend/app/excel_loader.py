@@ -1,17 +1,14 @@
 import json
 import time
 
+import gspread
 import pandas as pd
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
 
 from app.config import settings
 
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly"
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 CACHE_TTL_SECONDS = 30
 
@@ -20,44 +17,31 @@ _cached_at = 0.0
 
 
 def _get_credentials() -> Credentials:
-    token_json = settings.GOOGLE_TOKEN_JSON
+    service_account_json = settings.GOOGLE_SERVICE_ACCOUNT_JSON
 
-    if not token_json:
+    if not service_account_json:
         raise RuntimeError(
-            "GOOGLE_TOKEN_JSON is not configured."
+            "GOOGLE_SERVICE_ACCOUNT_JSON is not configured."
         )
 
     try:
-        token_info = json.loads(token_json)
+        service_account_info = json.loads(service_account_json)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            "GOOGLE_TOKEN_JSON contains invalid JSON."
+            "GOOGLE_SERVICE_ACCOUNT_JSON contains invalid JSON."
         ) from exc
 
     try:
-        credentials = Credentials.from_authorized_user_info(
-            token_info,
-            SCOPES,
+        if service_account_info.get("type") != "service_account":
+            raise ValueError("the JSON must contain type=service_account")
+        return Credentials.from_service_account_info(
+            service_account_info,
+            scopes=SCOPES,
         )
     except Exception as exc:
         raise RuntimeError(
-            f"Failed to create Google OAuth credentials: {exc}"
+            f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {exc}"
         ) from exc
-
-    if credentials.expired and credentials.refresh_token:
-        try:
-            credentials.refresh(Request())
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to refresh Google OAuth credentials: {exc}"
-            ) from exc
-
-    if not credentials.valid:
-        raise RuntimeError(
-            "Google OAuth credentials are invalid or expired."
-        )
-
-    return credentials
 
 
 def _fetch_sheet() -> pd.DataFrame:
@@ -76,29 +60,14 @@ def _fetch_sheet() -> pd.DataFrame:
         )
 
     try:
-        service = build(
-            "sheets",
-            "v4",
-            credentials=_get_credentials(),
-            cache_discovery=False,
-        )
-
-        result = (
-            service.spreadsheets()
-            .values()
-            .get(
-                spreadsheetId=spreadsheet_id,
-                range=f"{worksheet}!A:Z",
-            )
-            .execute()
-        )
-
+        worksheet = gspread.authorize(_get_credentials()).open_by_key(
+            spreadsheet_id
+        ).worksheet(worksheet)
+        values = worksheet.get_all_values()
     except Exception as exc:
         raise RuntimeError(
             f"Failed to read Google Sheet: {exc}"
         ) from exc
-
-    values = result.get("values", [])
 
     header_index = settings.INVENTORY_HEADER_ROW - 1
 
@@ -163,6 +132,20 @@ def _fetch_sheet() -> pd.DataFrame:
             "Google Sheet does not contain any property rows."
         )
 
+    required_columns = {
+        "Property Type",
+        "BHK",
+        "Budget (Cr)",
+        "Location",
+        "Status",
+    }
+    missing_columns = sorted(required_columns - set(dataframe.columns))
+    if missing_columns:
+        raise ValueError(
+            "Missing required inventory column(s): "
+            + ", ".join(missing_columns)
+        )
+
     return dataframe.reset_index(drop=True)
 
 
@@ -194,3 +177,8 @@ def load_google_sheet(
     _cached_at = now
 
     return _cached_inventory
+
+
+def load_inventory(force_refresh: bool = False) -> pd.DataFrame:
+    """Load the configured property inventory for API routes."""
+    return load_google_sheet(force_refresh=force_refresh)

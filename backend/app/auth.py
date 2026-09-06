@@ -35,6 +35,11 @@ def create_access_token(username: str) -> str:
 
 
 def require_authenticated_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> str:
+    if not settings.AUTH_JWT_SECRET or not _configured_users():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured on the server.",
+        )
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
     try:
