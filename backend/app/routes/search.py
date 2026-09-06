@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.auth import require_authenticated_user
 from app.models import SearchRequest, SearchResponse, FilterOptions
-from app.google_sheets_loader import load_google_sheet
+from app.excel_loader import load_inventory
 from app.matcher import run_match
 from app.normalizer import normalize_bhk
 import pandas as pd
@@ -11,7 +11,7 @@ router = APIRouter()
 @router.post("/search", response_model=SearchResponse)
 def search_properties(req: SearchRequest, _: str = Depends(require_authenticated_user)):
     try:
-        df = load_google_sheet()
+        df = load_inventory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
         
@@ -25,7 +25,7 @@ def search_properties(req: SearchRequest, _: str = Depends(require_authenticated
 @router.get("/filters", response_model=FilterOptions)
 def get_filters(_: str = Depends(require_authenticated_user)):
     try:
-        df = load_google_sheet()
+        df = load_inventory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
         
@@ -70,7 +70,7 @@ def get_filters(_: str = Depends(require_authenticated_user)):
 @router.post("/inventory/refresh")
 def refresh_inventory(_: str = Depends(require_authenticated_user)):
     try:
-        df = load_google_sheet(force_refresh=True)
+        df = load_inventory(force_refresh=True)
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error))
     return {"success": True, "total_properties": len(df)}
